@@ -2,16 +2,17 @@
 //
 // AU Bank PDFs use an RTL-encoded font where every character is a separate
 // text element with X positions running right-to-left within each word.
-// Sorting by X (the normal approach) scrambles text. Instead we use the
-// natural PDF content stream order which preserves correct reading order,
-// then apply ReconstructText to restore word boundaries.
+// We use GroupByRowsNaturalOrder + ReconstructText to restore reading order.
 //
-// Expected columns (left-to-right):
+// Each transaction is spread across several visual rows:
 //
-//	Transaction Date | Value Date | Description/Narration |
-//	Cheque/Reference No. | Debit (₹) | Credit (₹) | Balance (₹)
+//	pre-row  : "UPI/DR/570161013279/BA  ICIa65a07aa510943"   (desc start + ref start)
+//	main row : "01Dec2025 01Dec2025 NGALOREHARTICULTURE b98… 45.00 - 1,25,912.58"
+//	cont rows: "FRUITSAND c", "VEGETABLES/YESB/…", "JAGATPURA"
 //
-// Date format: "02 Jan 2006"   Amounts: Indian format "1,25,912.58"
+// The main row always contains at least one date and two amounts.
+// Pre-rows + description portion of main row + continuation rows form the
+// full description.
 package aubank
 
 import (
@@ -29,21 +30,20 @@ import (
 const rowTol = 4.0
 
 var (
-	// "01 Dec 2025" — spaces may be missing after reconstruction so we allow \s*
+	// Handles both "01Dec2025" (no spaces, from ReconstructText) and "01 Dec 2025"
 	dateRe = regexp.MustCompile(`\b(\d{2}\s*[A-Za-z]{3}\s*\d{4})\b`)
 
-	// Rightmost amount in a row: digits/commas then dot then 2 digits, optionally preceded by -
-	amountRe = regexp.MustCompile(`([\d,]+\.\d{2})`)
+	// Indian-format amounts: "45.00", "1,25,912.58"
+	amountRe = regexp.MustCompile(`\b([\d,]+\.\d{2})\b`)
 
-	// Reference numbers: long alphanumeric tokens (≥10 chars, no spaces)
-	refRe = regexp.MustCompile(`\b([A-Za-z0-9]{10,})\b`)
+	// Standalone dash representing an empty debit/credit cell
+	dashRe = regexp.MustCompile(`\s+-\s+`)
 
-	dateLayout = "02 Jan 2006"
-
-	// Stop words that appear in non-transaction rows (page headers/footers)
 	stopWords = []string{
 		"account statement", "statement date", "opening balance",
-		"closing balance", "page", "this is an auto", "call us at",
+		"closing balance", "this is an auto", "call us at",
+		"transaction date", "value date", "description/narration",
+		"cheque/reference", "debit", "credit", "balance",
 	}
 )
 
@@ -63,72 +63,90 @@ func (p *Parser) Parse(filePath, password string) ([]*models.Transaction, error)
 
 	var txns []*models.Transaction
 	for _, page := range pages {
-		// Use natural stream order — critical for AU Bank's RTL font encoding.
 		rows := pdfread.GroupByRowsNaturalOrder(page.Elements, rowTol)
-		pageTxns := parsePageRows(rows)
-		txns = append(txns, pageTxns...)
+		txns = append(txns, parsePageRows(rows)...)
 	}
 	return txns, nil
 }
 
-// parsePageRows converts reconstructed text rows into transactions.
-// A row that contains two dates and at least one amount is a transaction row.
-// Rows without dates are description continuations of the previous transaction.
+// parsePageRows is the core parser.
+//
+// Pass 1: reconstruct text for every row.
+// Pass 2: identify "main rows" — rows that contain ≥1 date AND ≥2 amounts.
+// Pass 3: for each main row at index m, the transaction block spans rows
+//
+//	[prev_main+1 … next_main-2]
+//
+// The -2 is because (next_main-1) is always the pre-row of the next
+// transaction (containing the start of the next description), which belongs
+// to the next transaction, not the current one.
 func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
-	var txns []*models.Transaction
-	var current *models.Transaction
+	texts := make([]string, len(rows))
+	for i, row := range rows {
+		texts[i] = pdfread.ReconstructText(row)
+	}
 
-	finalize := func() {
-		if current != nil {
-			current.Description = cleanDescription(current.Description)
-			current.Hash = current.ComputeHash()
-			txns = append(txns, current)
-			current = nil
+	// Find main row indices.
+	var mainIdxs []int
+	for i, t := range texts {
+		if len(findDates(t)) > 0 && len(findAmounts(t)) >= 2 {
+			mainIdxs = append(mainIdxs, i)
 		}
 	}
 
-	for _, row := range rows {
-		text := pdfread.ReconstructText(row)
+	var txns []*models.Transaction
 
-		if isNonTransactionRow(text) {
-			continue
+	for i, mainIdx := range mainIdxs {
+		// Block start: row after previous main row (or 0).
+		blockStart := 0
+		if i > 0 {
+			blockStart = mainIdxs[i-1] + 1
 		}
 
-		dates := extractDates(text)
-		if len(dates) >= 1 {
-			// Looks like a transaction row.
-			txn := buildTransaction(text, dates)
-			if txn != nil {
-				finalize()
-				current = txn
+		// Block end: two rows before next main row (or end of page).
+		// next_main-1 is the pre-row of the next transaction.
+		blockEnd := len(texts) - 1
+		if i+1 < len(mainIdxs) {
+			blockEnd = mainIdxs[i+1] - 2
+			if blockEnd < mainIdx {
+				blockEnd = mainIdx
+			}
+		}
+
+		// Gather description text from every row in the block.
+		var descParts []string
+		for j := blockStart; j <= blockEnd; j++ {
+			t := strings.TrimSpace(texts[j])
+			if t == "" || isNonTxnRow(t) {
 				continue
 			}
-		}
-
-		// Continuation: append to current transaction description.
-		if current != nil {
-			trimmed := strings.TrimSpace(text)
-			if trimmed != "" && !looksLikePageHeader(trimmed) {
-				current.Description += " " + trimmed
+			if j == mainIdx {
+				// Strip dates, amounts, and balance from the main row —
+				// what remains is the middle portion of the description.
+				t = descFromMainRow(t)
+			}
+			if t != "" {
+				descParts = append(descParts, t)
 			}
 		}
+
+		desc := cleanDesc(strings.Join(descParts, " "))
+		dates := findDates(texts[mainIdx])
+		amounts := findAmounts(texts[mainIdx])
+
+		txn := buildTxn(dates, amounts, desc)
+		if txn != nil {
+			txn.Hash = txn.ComputeHash()
+			txns = append(txns, txn)
+		}
 	}
-	finalize()
+
 	return txns
 }
 
-// buildTransaction extracts fields from a reconstructed row string.
-//
-// Row shape (after ReconstructText):
-//
-//	"01 Dec 2025 01 Dec 2025 UPI/DR/.../DESCRIPTION RefNumber 45.00 - 1,25,912.58"
-//
-// Strategy: anchor on dates (left) and amounts (right), everything in between
-// is description + reference.
-func buildTransaction(text string, dates []time.Time) *models.Transaction {
-	// We need at least one amount (debit or credit) and a balance.
-	amounts := extractAmounts(text)
-	if len(amounts) < 2 {
+// buildTxn assembles a Transaction from parsed fields.
+func buildTxn(dates []time.Time, amounts []float64, desc string) *models.Transaction {
+	if len(dates) == 0 || len(amounts) < 2 {
 		return nil
 	}
 
@@ -139,22 +157,16 @@ func buildTransaction(text string, dates []time.Time) *models.Transaction {
 		valueDate = &d
 	}
 
-	// Balance is the last amount. Debit/credit are the two before it.
+	// Layout: [...] debit credit balance — last amount is balance.
 	balance := amounts[len(amounts)-1]
+
 	var debit, credit float64
 	if len(amounts) >= 3 {
-		// Check which of the two preceding amounts is non-zero.
-		a1 := amounts[len(amounts)-3]
-		a2 := amounts[len(amounts)-2]
-		if a1 > 0 {
-			debit = a1
-		}
-		if a2 > 0 {
-			credit = a2
-		}
-	} else {
-		// Only balance found — likely a continuation row; skip.
-		return nil
+		debit = amounts[len(amounts)-3]
+		credit = amounts[len(amounts)-2]
+	} else if len(amounts) == 2 {
+		// Could be just one side + balance.
+		debit = amounts[0]
 	}
 
 	amount := debit
@@ -164,12 +176,9 @@ func buildTransaction(text string, dates []time.Time) *models.Transaction {
 		txnType = models.TxnCredit
 	}
 
-	if amount == 0 {
+	if amount == 0 || desc == "" {
 		return nil
 	}
-
-	// Description: everything between the last date match and the first amount.
-	desc := extractDescription(text)
 
 	return &models.Transaction{
 		ID:              uuid.New().String(),
@@ -177,7 +186,6 @@ func buildTransaction(text string, dates []time.Time) *models.Transaction {
 		TransactionDate: txnDate,
 		ValueDate:       valueDate,
 		Description:     desc,
-		ReferenceNo:     extractReference(text),
 		Amount:          amount,
 		Type:            txnType,
 		Balance:         balance,
@@ -186,14 +194,36 @@ func buildTransaction(text string, dates []time.Time) *models.Transaction {
 	}
 }
 
-// extractDates finds all "DD Mon YYYY" patterns in text and parses them.
-func extractDates(text string) []time.Time {
+// descFromMainRow strips dates and amounts from a main row leaving just the
+// description/reference fragment that sits in the middle.
+func descFromMainRow(text string) string {
+	// Remove date tokens.
+	text = dateRe.ReplaceAllString(text, " ")
+	// Remove amount tokens (including the balance).
+	text = amountRe.ReplaceAllString(text, " ")
+	// Remove standalone dashes (empty cells).
+	text = dashRe.ReplaceAllString(text, " ")
+	return cleanDesc(text)
+}
+
+// findDates extracts and parses all date tokens from text.
+// Handles both "01Dec2025" and "01 Dec 2025".
+func findDates(text string) []time.Time {
 	matches := dateRe.FindAllString(text, -1)
 	var dates []time.Time
+	seen := map[string]bool{}
 	for _, m := range matches {
-		// Normalise: collapse any internal whitespace
-		m = strings.Join(strings.Fields(m), " ")
-		t, err := time.Parse(dateLayout, m)
+		m = strings.Join(strings.Fields(m), "") // "01 Dec 2025" → "01Dec2025"
+		if seen[m] {
+			continue
+		}
+		seen[m] = true
+		// Try compact layout first, then spaced.
+		t, err := time.Parse("02Jan2006", m)
+		if err != nil {
+			spaced := m[:2] + " " + m[2:5] + " " + m[5:]
+			t, err = time.Parse("02 Jan 2006", spaced)
+		}
 		if err == nil {
 			dates = append(dates, t)
 		}
@@ -201,12 +231,12 @@ func extractDates(text string) []time.Time {
 	return dates
 }
 
-// extractAmounts finds all numeric amounts in the row (right side of the row).
-func extractAmounts(text string) []float64 {
+// findAmounts extracts all numeric amounts from text.
+func findAmounts(text string) []float64 {
 	matches := amountRe.FindAllString(text, -1)
 	var amounts []float64
 	for _, m := range matches {
-		v, err := parseIndianAmount(m)
+		v, err := parseIndianAmt(m)
 		if err == nil && v > 0 {
 			amounts = append(amounts, v)
 		}
@@ -214,37 +244,12 @@ func extractAmounts(text string) []float64 {
 	return amounts
 }
 
-// extractDescription pulls the middle portion of the row as description text.
-// It strips leading dates and trailing amounts/reference numbers.
-func extractDescription(text string) string {
-	// Remove all date occurrences from the left.
-	result := dateRe.ReplaceAllString(text, " ")
-	// Remove amounts (numbers with commas and decimals).
-	result = amountRe.ReplaceAllString(result, " ")
-	// Remove standalone "-" that represent empty debit/credit cells.
-	result = regexp.MustCompile(`\s+-\s+`).ReplaceAllString(result, " ")
-	// Remove long reference-looking tokens (ICIxxxxxx, alphanumeric ≥15 chars).
-	result = regexp.MustCompile(`\b[A-Za-z0-9]{15,}\b`).ReplaceAllString(result, " ")
-	return cleanDescription(result)
+func parseIndianAmt(s string) (float64, error) {
+	s = strings.ReplaceAll(s, ",", "")
+	return strconv.ParseFloat(strings.TrimSpace(s), 64)
 }
 
-// extractReference tries to find the cheque/reference number — a long
-// alphanumeric token that isn't part of UPI strings.
-func extractReference(text string) string {
-	// Look for tokens that look like ICICI reference numbers: start with IC or
-	// are purely hex-like, length 20-40.
-	refPattern := regexp.MustCompile(`\b(IC[A-Za-z0-9]{18,}|[0-9]{10,15})\b`)
-	m := refPattern.FindString(text)
-	return m
-}
-
-func cleanDescription(s string) string {
-	s = strings.Join(strings.Fields(s), " ")
-	s = strings.TrimSpace(s)
-	return s
-}
-
-func isNonTransactionRow(text string) bool {
+func isNonTxnRow(text string) bool {
 	lower := strings.ToLower(text)
 	for _, w := range stopWords {
 		if strings.Contains(lower, w) {
@@ -254,20 +259,6 @@ func isNonTransactionRow(text string) bool {
 	return false
 }
 
-func looksLikePageHeader(text string) bool {
-	lower := strings.ToLower(text)
-	return strings.Contains(lower, "page") ||
-		strings.Contains(lower, "account") ||
-		strings.Contains(lower, "narration")
-}
-
-// parseIndianAmount handles "1,25,912.58" and plain "45.00".
-func parseIndianAmount(s string) (float64, error) {
-	s = strings.ReplaceAll(s, ",", "")
-	s = strings.ReplaceAll(s, "₹", "")
-	s = strings.TrimSpace(s)
-	if s == "" || s == "-" {
-		return 0, nil
-	}
-	return strconv.ParseFloat(s, 64)
+func cleanDesc(s string) string {
+	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
 }
