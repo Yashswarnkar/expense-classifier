@@ -1,6 +1,6 @@
 # expense-classifier
 
-A CLI tool that parses **AU Bank account statements** and **HDFC credit card statements** (password-protected PDFs), deduplicates transactions across sources, and uses a **local Ollama LLM** to classify each transaction into your own spending categories.
+A CLI tool that parses **AU Bank account statements**, **HDFC Diners credit card statements**, and **Amazon Pay ICICI credit card statements** (password-protected PDFs), deduplicates transactions across all sources, and uses a **local Ollama LLM** to classify each transaction into your own spending categories.
 
 All data stays on your machine — no external API calls, no cloud storage.
 
@@ -9,15 +9,17 @@ All data stays on your machine — no external API calls, no cloud storage.
 ## Features
 
 - Parse AU Bank account statement PDFs (password-protected)
-- Parse HDFC Diners/credit card statement PDFs (password-protected)
-- Automatic deduplication — the same payment will not be counted twice even if it appears in both a bank statement and a credit card statement
+- Parse HDFC Diners credit card statement PDFs (password-protected)
+- Parse Amazon Pay ICICI credit card statement PDFs (password-protected)
+- Automatic deduplication — the same payment will not be counted twice even if it appears in multiple statements
 - Local LLM classification via [Ollama](https://ollama.com) (default: `mistral`)
 - User-defined categories with optional hint keywords (`categories.txt`)
-- SQLite storage for all transactions
+- SQLite storage for all transactions — new statements never overwrite existing data
 - Export to CSV and/or JSON
 - Spending summary by category (ready for a future UI)
 - Interactive mode: review and override each LLM suggestion at the terminal
 - `classify` command: manually fix a single transaction or re-run the LLM on everything still marked *Uncategorized*
+- `debug-pdf` command: dump raw extracted text rows to diagnose parser issues
 
 ---
 
@@ -34,7 +36,7 @@ All data stays on your machine — no external API calls, no cloud storage.
 ## Installation
 
 ```bash
-git clone https://github.com/yourusername/expense-classifier
+git clone https://github.com/Yashswarnkar/expense-classifier
 cd expense-classifier
 go build -o expense-classifier .
 ```
@@ -42,7 +44,7 @@ go build -o expense-classifier .
 Or install directly:
 
 ```bash
-go install github.com/yourusername/expense-classifier@latest
+go install github.com/Yashswarnkar/expense-classifier@latest
 ```
 
 ---
@@ -59,24 +61,40 @@ ollama pull mistral
   --password "your-pdf-password" \
   --type aubank
 
-# 3. Process an HDFC CC statement
+# 3. Process an HDFC Diners CC statement
 ./expense-classifier process \
   --file path/to/hdfc-statement.pdf \
   --password "your-pdf-password" \
   --type hdfc
 
-# 4. View spending summary
+# 4. Process an Amazon Pay ICICI CC statement
+./expense-classifier process \
+  --file path/to/amazon-statement.pdf \
+  --password "your-pdf-password" \
+  --type amazon
+
+# 5. View spending summary
 ./expense-classifier summary
 
-# 5. Export everything
+# 6. Export everything
 ./expense-classifier export --format all
 ```
 
 ---
 
+## Supported Statement Formats
+
+| Bank / Card | Type flag | Auto-detected from filename |
+|---|---|---|
+| AU Small Finance Bank | `aubank` | filename contains `aubank` or `au_bank` |
+| HDFC Diners Credit Card | `hdfc` | filename contains `hdfc` or `diners` |
+| Amazon Pay ICICI Credit Card | `amazon` | filename contains `amazon` or `amazonpay` |
+
+---
+
 ## Configuration
 
-Copy `config.yaml` and edit as needed. The tool looks for `config.yaml` in the current directory, or you can pass `--config path/to/config.yaml`.
+Copy `config.yaml` and edit as needed. The tool looks for `config.yaml` in the current directory, or pass `--config path/to/config.yaml`.
 
 ```yaml
 ollama:
@@ -132,7 +150,7 @@ Parse a statement PDF and store classified transactions.
 Flags:
   -f, --file string       Path to statement PDF (required)
   -p, --password string   PDF password
-  -t, --type string       aubank | hdfc  (auto-detected from filename if omitted)
+  -t, --type string       aubank | hdfc | amazon  (auto-detected from filename if omitted)
   -i, --interactive       Review each classification at the terminal
       --skip-llm          Store without classifying (classify later with `classify`)
 ```
@@ -145,7 +163,7 @@ Export stored transactions to files.
 Flags:
       --format string   csv | json | all  (default "all")
   -o, --output string   Output directory  (default: export_dir in config)
-      --source string   Filter: aubank | hdfc
+      --source string   Filter by source: aubank | hdfc_cc | amazon_pay_cc
       --from string     Start date YYYY-MM-DD
       --to string       End date YYYY-MM-DD
 ```
@@ -163,7 +181,7 @@ Flags:
 
 Manually override a category or re-run the LLM.
 
-```
+```bash
 # Fix a single transaction (get the ID from the export)
 ./expense-classifier classify --id <uuid> --category "Dining Out"
 
@@ -171,38 +189,60 @@ Manually override a category or re-run the LLM.
 ./expense-classifier classify --reclassify-all
 ```
 
+### `debug-pdf`
+
+Dump raw extracted text rows from a PDF with Y-positions. Useful for diagnosing why a parser cannot find the table header.
+
+```bash
+./expense-classifier debug-pdf \
+  --file statement.pdf \
+  --password "your-password" \
+  --max-rows 100
+```
+
+---
+
+## How Data Is Stored
+
+- All transactions go into a single SQLite database (`expenses.db` by default)
+- Re-processing the same statement is safe — duplicates are detected by a hash of `(date + amount + normalised description)` and silently skipped
+- Source is excluded from the hash, so the same UPI payment appearing in both a bank statement and a credit card statement is stored only once
+- Categories can be updated at any time without re-parsing
+
 ---
 
 ## Project Structure
 
 ```
 expense-classifier/
-├── cmd/                        # Cobra CLI commands
+├── cmd/                          # Cobra CLI commands
 │   ├── root.go
-│   ├── process.go              # Main pipeline: parse → dedup → classify → save
+│   ├── process.go                # Main pipeline: parse → dedup → classify → save
 │   ├── export.go
 │   ├── summary.go
-│   └── classify.go
+│   ├── classify.go
+│   └── debug.go                  # debug-pdf command
 ├── internal/
-│   ├── config/                 # Viper config loading
-│   ├── models/                 # Transaction struct + dedup hash logic
-│   ├── pdf/                    # PDF decryption (pdfcpu) + text extraction
+│   ├── config/                   # Viper config loading
+│   ├── models/                   # Transaction struct + dedup hash logic
+│   ├── pdf/                      # PDF decryption (pdfcpu) + text extraction
 │   ├── parser/
-│   │   ├── interface.go        # Parser interface — add new banks here
-│   │   ├── aubank/             # AU Bank account statement parser
-│   │   └── hdfc/               # HDFC credit card statement parser
+│   │   ├── interface.go          # Parser interface — add new banks here
+│   │   ├── aubank/               # AU Small Finance Bank account statement
+│   │   ├── hdfc/                 # HDFC Diners credit card statement
+│   │   └── amazonpay/            # Amazon Pay ICICI credit card statement
 │   ├── classifier/
-│   │   ├── interface.go        # Classifier interface
+│   │   ├── interface.go          # Classifier interface
 │   │   └── ollama/
-│   │       ├── prompt.go       # Prompt template (edit to tune LLM behaviour)
-│   │       ├── client.go       # Ollama HTTP client
-│   │       └── classifier.go   # Wires prompt + client, matches response to category
-│   ├── categories/             # categories.txt loader
-│   ├── deduplicator/           # Hash-based dedup
+│   │       ├── prompt.go         # Prompt template (edit to tune LLM behaviour)
+│   │       ├── client.go         # Ollama HTTP client
+│   │       └── classifier.go     # Wires prompt + client, matches response to category
+│   ├── categories/               # categories.txt loader
+│   ├── deduplicator/             # Hash-based dedup
 │   └── storage/
-│       ├── interface.go        # Store interface (UI layer talks to this)
-│       ├── sqlite/             # SQLite implementation
-│       └── export/             # CSV + JSON writers
+│       ├── interface.go          # Store interface (UI layer talks to this)
+│       ├── sqlite/               # SQLite implementation
+│       └── export/               # CSV + JSON writers
 ├── config.yaml
 ├── categories.txt
 └── main.go
@@ -230,7 +270,7 @@ The deduplication hash is computed from:
 - Amount in paise (integer, avoids float rounding)
 - Lowercased, whitespace-normalised description
 
-Source (bank vs credit card) is **excluded** from the hash. This means if the same UPI payment appears in your AU Bank outflow and your HDFC statement, only one copy is kept.
+Source (bank vs credit card) is **excluded** from the hash. This means if the same UPI payment appears in your AU Bank outflow and your Amazon Pay statement, only one copy is kept.
 
 ---
 
