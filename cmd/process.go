@@ -14,8 +14,9 @@ import (
 	"github.com/Yashswarnkar/expense-classifier/internal/deduplicator"
 	"github.com/Yashswarnkar/expense-classifier/internal/models"
 	"github.com/Yashswarnkar/expense-classifier/internal/parser"
-	aubankparser "github.com/Yashswarnkar/expense-classifier/internal/parser/aubank"
-	hdfcparser "github.com/Yashswarnkar/expense-classifier/internal/parser/hdfc"
+	aubankparser    "github.com/Yashswarnkar/expense-classifier/internal/parser/aubank"
+	amazonpayparser "github.com/Yashswarnkar/expense-classifier/internal/parser/amazonpay"
+	hdfcparser      "github.com/Yashswarnkar/expense-classifier/internal/parser/hdfc"
 	"github.com/Yashswarnkar/expense-classifier/internal/storage/sqlite"
 )
 
@@ -138,18 +139,23 @@ func selectParser(typFlag, filePath string) (parser.Parser, error) {
 		return aubankparser.New(), nil
 	case "hdfc", "hdfc_cc":
 		return hdfcparser.New(), nil
+	case "amazon", "amazonpay", "amazon_pay", "amazon_pay_cc", "icici":
+		return amazonpayparser.New(), nil
 	case "":
 		// Auto-detect from file name.
 		lower := strings.ToLower(filePath)
-		if strings.Contains(lower, "au") {
+		if strings.Contains(lower, "amazon") || strings.Contains(lower, "amazonpay") {
+			return amazonpayparser.New(), nil
+		}
+		if strings.Contains(lower, "aubank") || strings.Contains(lower, "au_bank") {
 			return aubankparser.New(), nil
 		}
-		if strings.Contains(lower, "hdfc") || strings.Contains(lower, "diners") || strings.Contains(lower, "credit") {
+		if strings.Contains(lower, "hdfc") || strings.Contains(lower, "diners") {
 			return hdfcparser.New(), nil
 		}
-		return nil, fmt.Errorf("could not auto-detect statement type; use --type aubank|hdfc")
+		return nil, fmt.Errorf("could not auto-detect statement type; use --type aubank|hdfc|amazon")
 	default:
-		return nil, fmt.Errorf("unknown statement type %q; use aubank or hdfc", typFlag)
+		return nil, fmt.Errorf("unknown statement type %q; use aubank, hdfc, or amazon", typFlag)
 	}
 }
 

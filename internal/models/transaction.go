@@ -13,8 +13,9 @@ import (
 type SourceType string
 
 const (
-	SourceAUBank SourceType = "au_bank"
-	SourceHDFCCC SourceType = "hdfc_cc"
+	SourceAUBank       SourceType = "au_bank"
+	SourceHDFCCC       SourceType = "hdfc_cc"
+	SourceAmazonPayCC  SourceType = "amazon_pay_cc"
 )
 
 // TxnType indicates whether money went out or came in.
