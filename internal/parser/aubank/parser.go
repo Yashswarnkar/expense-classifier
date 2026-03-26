@@ -36,8 +36,11 @@ var (
 	// Indian-format amounts: "45.00", "1,25,912.58"
 	amountRe = regexp.MustCompile(`\b([\d,]+\.\d{2})\b`)
 
-	// Standalone dash representing an empty debit/credit cell
-	dashRe = regexp.MustCompile(`\s+-\s+`)
+	// Captures the three trailing cells: debit|"-"  credit|"-"  balance
+	// Examples:
+	//   "45.00 - 1,25,912.58"   → debit=45.00  credit=-       balance=1,25,912.58
+	//   "- 2.00 53,717.56"      → debit=-       credit=2.00    balance=53,717.56
+	amountTripletRe = regexp.MustCompile(`([\d,]+\.\d{2}|-)\s+([\d,]+\.\d{2}|-)\s+([\d,]+\.\d{2})\s*$`)
 
 	stopWords = []string{
 		"account statement", "statement date", "opening balance",
@@ -86,10 +89,10 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 		texts[i] = pdfread.ReconstructText(row)
 	}
 
-	// Find main row indices.
+	// Find main row indices: rows that contain a date AND the amount triplet.
 	var mainIdxs []int
 	for i, t := range texts {
-		if len(findDates(t)) > 0 && len(findAmounts(t)) >= 2 {
+		if len(findDates(t)) > 0 && amountTripletRe.MatchString(t) {
 			mainIdxs = append(mainIdxs, i)
 		}
 	}
@@ -132,9 +135,8 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 
 		desc := cleanDesc(strings.Join(descParts, " "))
 		dates := findDates(texts[mainIdx])
-		amounts := findAmounts(texts[mainIdx])
 
-		txn := buildTxn(dates, amounts, desc)
+		txn := buildTxn(dates, texts[mainIdx], desc)
 		if txn != nil {
 			txn.Hash = txn.ComputeHash()
 			txns = append(txns, txn)
@@ -144,10 +146,44 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 	return txns
 }
 
-// buildTxn assembles a Transaction from parsed fields.
-func buildTxn(dates []time.Time, amounts []float64, desc string) *models.Transaction {
-	if len(dates) == 0 || len(amounts) < 2 {
+// buildTxn assembles a Transaction from the parsed dates, raw main-row text,
+// and collected description.
+//
+// It uses amountTripletRe to match the three trailing cells of the main row:
+//
+//	debit_cell  credit_cell  balance
+//
+// where each of debit_cell / credit_cell is either a number or "-".
+// This is the only reliable way to distinguish debit from credit because
+// the "-" placeholder is lost when scanning for numeric amounts alone.
+func buildTxn(dates []time.Time, mainRowText, desc string) *models.Transaction {
+	if len(dates) == 0 || desc == "" {
 		return nil
+	}
+
+	m := amountTripletRe.FindStringSubmatch(mainRowText)
+	if m == nil {
+		return nil // no amount triplet found — not a transaction row
+	}
+
+	debitStr, creditStr, balanceStr := m[1], m[2], m[3]
+
+	debit, _ := parseIndianAmt(debitStr)   // 0 when debitStr == "-"
+	credit, _ := parseIndianAmt(creditStr) // 0 when creditStr == "-"
+	balance, _ := parseIndianAmt(balanceStr)
+
+	var amount float64
+	txnType := models.TxnDebit
+
+	switch {
+	case debit > 0 && credit == 0:
+		amount = debit
+		txnType = models.TxnDebit
+	case credit > 0 && debit == 0:
+		amount = credit
+		txnType = models.TxnCredit
+	default:
+		return nil // both zero or both non-zero — skip
 	}
 
 	txnDate := dates[0]
@@ -155,29 +191,6 @@ func buildTxn(dates []time.Time, amounts []float64, desc string) *models.Transac
 	if len(dates) >= 2 {
 		d := dates[1]
 		valueDate = &d
-	}
-
-	// Layout: [...] debit credit balance — last amount is balance.
-	balance := amounts[len(amounts)-1]
-
-	var debit, credit float64
-	if len(amounts) >= 3 {
-		debit = amounts[len(amounts)-3]
-		credit = amounts[len(amounts)-2]
-	} else if len(amounts) == 2 {
-		// Could be just one side + balance.
-		debit = amounts[0]
-	}
-
-	amount := debit
-	txnType := models.TxnDebit
-	if credit > 0 && debit == 0 {
-		amount = credit
-		txnType = models.TxnCredit
-	}
-
-	if amount == 0 || desc == "" {
-		return nil
 	}
 
 	return &models.Transaction{
@@ -194,15 +207,14 @@ func buildTxn(dates []time.Time, amounts []float64, desc string) *models.Transac
 	}
 }
 
-// descFromMainRow strips dates and amounts from a main row leaving just the
-// description/reference fragment that sits in the middle.
+// descFromMainRow strips dates and the amount triplet from a main row,
+// leaving just the description/reference fragment in the middle.
 func descFromMainRow(text string) string {
-	// Remove date tokens.
 	text = dateRe.ReplaceAllString(text, " ")
-	// Remove amount tokens (including the balance).
+	text = amountTripletRe.ReplaceAllString(text, " ")
+	// Also remove any leftover standalone amounts or dashes.
 	text = amountRe.ReplaceAllString(text, " ")
-	// Remove standalone dashes (empty cells).
-	text = dashRe.ReplaceAllString(text, " ")
+	text = regexp.MustCompile(`\s+-\s*$`).ReplaceAllString(text, " ")
 	return cleanDesc(text)
 }
 
@@ -231,22 +243,13 @@ func findDates(text string) []time.Time {
 	return dates
 }
 
-// findAmounts extracts all numeric amounts from text.
-func findAmounts(text string) []float64 {
-	matches := amountRe.FindAllString(text, -1)
-	var amounts []float64
-	for _, m := range matches {
-		v, err := parseIndianAmt(m)
-		if err == nil && v > 0 {
-			amounts = append(amounts, v)
-		}
-	}
-	return amounts
-}
-
 func parseIndianAmt(s string) (float64, error) {
+	s = strings.TrimSpace(s)
+	if s == "-" || s == "" {
+		return 0, nil
+	}
 	s = strings.ReplaceAll(s, ",", "")
-	return strconv.ParseFloat(strings.TrimSpace(s), 64)
+	return strconv.ParseFloat(s, 64)
 }
 
 func isNonTxnRow(text string) bool {
