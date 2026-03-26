@@ -1,17 +1,21 @@
 // Package aubank parses AU Small Finance Bank account statement PDFs.
 //
-// Expected column order (left-to-right):
-//   Transaction Date | Value Date | Description/Narration |
-//   Cheque/Reference No. | Debit (₹) | Credit (₹) | Balance (₹)
+// AU Bank PDFs use an RTL-encoded font where every character is a separate
+// text element with X positions running right-to-left within each word.
+// Sorting by X (the normal approach) scrambles text. Instead we use the
+// natural PDF content stream order which preserves correct reading order,
+// then apply ReconstructText to restore word boundaries.
 //
-// Dates are in "02 Jan 2006" format.
-// Amounts use Indian number formatting (1,25,912.58).
-// The Description column can span multiple text rows.
+// Expected columns (left-to-right):
+//
+//	Transaction Date | Value Date | Description/Narration |
+//	Cheque/Reference No. | Debit (₹) | Credit (₹) | Balance (₹)
+//
+// Date format: "02 Jan 2006"   Amounts: Indian format "1,25,912.58"
 package aubank
 
 import (
 	"fmt"
-	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -22,14 +26,25 @@ import (
 	pdfread "github.com/Yashswarnkar/expense-classifier/internal/pdf"
 )
 
-const (
-	dateLayout = "02 Jan 2006"
-	rowTol     = 4.0 // Y-position tolerance in PDF points for row grouping
-)
+const rowTol = 4.0
 
 var (
-	dateRe     = regexp.MustCompile(`^\d{2}\s+[A-Za-z]{3}\s+\d{4}$`)
-	amountRe   = regexp.MustCompile(`^[\d,]+\.\d{2}$`)
+	// "01 Dec 2025" — spaces may be missing after reconstruction so we allow \s*
+	dateRe = regexp.MustCompile(`\b(\d{2}\s*[A-Za-z]{3}\s*\d{4})\b`)
+
+	// Rightmost amount in a row: digits/commas then dot then 2 digits, optionally preceded by -
+	amountRe = regexp.MustCompile(`([\d,]+\.\d{2})`)
+
+	// Reference numbers: long alphanumeric tokens (≥10 chars, no spaces)
+	refRe = regexp.MustCompile(`\b([A-Za-z0-9]{10,})\b`)
+
+	dateLayout = "02 Jan 2006"
+
+	// Stop words that appear in non-transaction rows (page headers/footers)
+	stopWords = []string{
+		"account statement", "statement date", "opening balance",
+		"closing balance", "page", "this is an auto", "call us at",
+	}
 )
 
 // Parser implements parser.Parser for AU Bank account statements.
@@ -46,128 +61,26 @@ func (p *Parser) Parse(filePath, password string) ([]*models.Transaction, error)
 		return nil, fmt.Errorf("aubank: extract text: %w", err)
 	}
 
-	all := pdfread.AllElements(pages)
-	rows := pdfread.GroupByRows(all, rowTol)
-
-	// Find the header row to determine column X-boundaries.
-	colBounds, headerIdx, err := detectColumnBounds(rows)
-	if err != nil {
-		return nil, fmt.Errorf("aubank: %w", err)
+	var txns []*models.Transaction
+	for _, page := range pages {
+		// Use natural stream order — critical for AU Bank's RTL font encoding.
+		rows := pdfread.GroupByRowsNaturalOrder(page.Elements, rowTol)
+		pageTxns := parsePageRows(rows)
+		txns = append(txns, pageTxns...)
 	}
-
-	return parseTransactions(rows[headerIdx+1:], colBounds)
+	return txns, nil
 }
 
-// columnBounds holds the X-coordinate ranges for the seven columns.
-type columnBounds struct {
-	txnDate    [2]float64
-	valueDate  [2]float64
-	desc       [2]float64
-	reference  [2]float64
-	debit      [2]float64
-	credit     [2]float64
-	balance    [2]float64
-}
-
-func detectColumnBounds(rows [][]pdfread.TextElement) (columnBounds, int, error) {
-	for i, row := range rows {
-		text := strings.ToLower(pdfread.RowText(row))
-		// The header row contains all these keywords.
-		if strings.Contains(text, "transaction") &&
-			strings.Contains(text, "description") &&
-			strings.Contains(text, "debit") &&
-			strings.Contains(text, "balance") {
-
-			return buildBounds(row), i, nil
-		}
-	}
-	return columnBounds{}, 0, fmt.Errorf("could not locate table header row — is this an AU Bank statement?")
-}
-
-// buildBounds maps header cells to their X midpoints, then derives ranges.
-// We look for the 7 known header keywords and assign column indices.
-func buildBounds(headerRow []pdfread.TextElement) columnBounds {
-	type colInfo struct {
-		keyword string
-		midX    float64
-	}
-
-	// Collect midpoints for cells we recognise.
-	var infos []colInfo
-	keywords := []string{"transaction", "value", "description", "cheque", "debit", "credit", "balance"}
-	for _, el := range headerRow {
-		low := strings.ToLower(el.Content)
-		for _, kw := range keywords {
-			if strings.Contains(low, kw) {
-				infos = append(infos, colInfo{keyword: kw, midX: el.X})
-				break
-			}
-		}
-	}
-
-	// Build a map keyword→X.
-	xOf := map[string]float64{}
-	for _, inf := range infos {
-		if _, exists := xOf[inf.keyword]; !exists {
-			xOf[inf.keyword] = inf.midX
-		}
-	}
-
-	// Fallback: if we don't have all columns use generous X-splits.
-	getX := func(kw string, fallback float64) float64 {
-		if v, ok := xOf[kw]; ok {
-			return v
-		}
-		return fallback
-	}
-
-	x0 := getX("transaction", 30)
-	x1 := getX("value", 100)
-	x2 := getX("description", 170)
-	x3 := getX("cheque", 330)
-	x4 := getX("debit", 410)
-	x5 := getX("credit", 470)
-	x6 := getX("balance", 530)
-	xMax := x6 + 100
-
-	mid := func(a, b float64) float64 { return (a + b) / 2 }
-
-	return columnBounds{
-		txnDate:   [2]float64{x0 - 10, mid(x0, x1)},
-		valueDate: [2]float64{mid(x0, x1), mid(x1, x2)},
-		desc:      [2]float64{mid(x1, x2), mid(x2, x3)},
-		reference: [2]float64{mid(x2, x3), mid(x3, x4)},
-		debit:     [2]float64{mid(x3, x4), mid(x4, x5)},
-		credit:    [2]float64{mid(x4, x5), mid(x5, x6)},
-		balance:   [2]float64{mid(x5, x6), xMax},
-	}
-}
-
-func inRange(x float64, r [2]float64) bool {
-	return x >= r[0] && x < r[1]
-}
-
-// cellsInRange collects text from elements that fall within a column range.
-func cellsInRange(row []pdfread.TextElement, r [2]float64) string {
-	var parts []string
-	for _, el := range row {
-		if inRange(el.X, r) {
-			parts = append(parts, el.Content)
-		}
-	}
-	return strings.TrimSpace(strings.Join(parts, " "))
-}
-
-// parseTransactions converts raw rows (below the header) into Transaction objects.
-// Multi-line descriptions are handled by folding continuation rows into the
-// preceding transaction's description field.
-func parseTransactions(rows [][]pdfread.TextElement, cb columnBounds) ([]*models.Transaction, error) {
+// parsePageRows converts reconstructed text rows into transactions.
+// A row that contains two dates and at least one amount is a transaction row.
+// Rows without dates are description continuations of the previous transaction.
+func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 	var txns []*models.Transaction
 	var current *models.Transaction
 
 	finalize := func() {
 		if current != nil {
-			current.Description = strings.TrimSpace(current.Description)
+			current.Description = cleanDescription(current.Description)
 			current.Hash = current.ComputeHash()
 			txns = append(txns, current)
 			current = nil
@@ -175,76 +88,180 @@ func parseTransactions(rows [][]pdfread.TextElement, cb columnBounds) ([]*models
 	}
 
 	for _, row := range rows {
-		dateStr := strings.TrimSpace(cellsInRange(row, cb.txnDate))
+		text := pdfread.ReconstructText(row)
 
-		if isDate(dateStr) {
-			finalize()
+		if isNonTransactionRow(text) {
+			continue
+		}
 
-			txnDate, err := time.Parse(dateLayout, dateStr)
-			if err != nil {
+		dates := extractDates(text)
+		if len(dates) >= 1 {
+			// Looks like a transaction row.
+			txn := buildTransaction(text, dates)
+			if txn != nil {
+				finalize()
+				current = txn
 				continue
 			}
+		}
 
-			valDateStr := cellsInRange(row, cb.valueDate)
-			var valDate *time.Time
-			if d, err := time.Parse(dateLayout, valDateStr); err == nil {
-				valDate = &d
-			}
-
-			desc := cellsInRange(row, cb.desc)
-			ref := cellsInRange(row, cb.reference)
-			debitStr := cellsInRange(row, cb.debit)
-			creditStr := cellsInRange(row, cb.credit)
-			balStr := cellsInRange(row, cb.balance)
-
-			amount, txnType := resolveAmount(debitStr, creditStr)
-			balance, _ := parseIndianAmount(balStr)
-
-			current = &models.Transaction{
-				ID:              uuid.New().String(),
-				Source:          models.SourceAUBank,
-				TransactionDate: txnDate,
-				ValueDate:       valDate,
-				Description:     desc,
-				ReferenceNo:     ref,
-				Amount:          amount,
-				Type:            txnType,
-				Balance:         balance,
-				Category:        "Uncategorized",
-				CreatedAt:       time.Now(),
-			}
-		} else if current != nil {
-			// Continuation: append description text from the desc column.
-			extra := cellsInRange(row, cb.desc)
-			if extra != "" {
-				current.Description += " " + extra
+		// Continuation: append to current transaction description.
+		if current != nil {
+			trimmed := strings.TrimSpace(text)
+			if trimmed != "" && !looksLikePageHeader(trimmed) {
+				current.Description += " " + trimmed
 			}
 		}
-		// Rows before the first date (e.g., account summary) are ignored.
 	}
 	finalize()
-	return txns, nil
+	return txns
 }
 
-func isDate(s string) bool {
-	return dateRe.MatchString(s)
-}
-
-// resolveAmount picks the non-zero side and determines direction.
-func resolveAmount(debitStr, creditStr string) (float64, models.TxnType) {
-	debit, _ := parseIndianAmount(debitStr)
-	credit, _ := parseIndianAmount(creditStr)
-
-	if math.Abs(debit) > 0 {
-		return debit, models.TxnDebit
+// buildTransaction extracts fields from a reconstructed row string.
+//
+// Row shape (after ReconstructText):
+//
+//	"01 Dec 2025 01 Dec 2025 UPI/DR/.../DESCRIPTION RefNumber 45.00 - 1,25,912.58"
+//
+// Strategy: anchor on dates (left) and amounts (right), everything in between
+// is description + reference.
+func buildTransaction(text string, dates []time.Time) *models.Transaction {
+	// We need at least one amount (debit or credit) and a balance.
+	amounts := extractAmounts(text)
+	if len(amounts) < 2 {
+		return nil
 	}
-	if math.Abs(credit) > 0 {
-		return credit, models.TxnCredit
+
+	txnDate := dates[0]
+	var valueDate *time.Time
+	if len(dates) >= 2 {
+		d := dates[1]
+		valueDate = &d
 	}
-	return 0, models.TxnDebit
+
+	// Balance is the last amount. Debit/credit are the two before it.
+	balance := amounts[len(amounts)-1]
+	var debit, credit float64
+	if len(amounts) >= 3 {
+		// Check which of the two preceding amounts is non-zero.
+		a1 := amounts[len(amounts)-3]
+		a2 := amounts[len(amounts)-2]
+		if a1 > 0 {
+			debit = a1
+		}
+		if a2 > 0 {
+			credit = a2
+		}
+	} else {
+		// Only balance found — likely a continuation row; skip.
+		return nil
+	}
+
+	amount := debit
+	txnType := models.TxnDebit
+	if credit > 0 && debit == 0 {
+		amount = credit
+		txnType = models.TxnCredit
+	}
+
+	if amount == 0 {
+		return nil
+	}
+
+	// Description: everything between the last date match and the first amount.
+	desc := extractDescription(text)
+
+	return &models.Transaction{
+		ID:              uuid.New().String(),
+		Source:          models.SourceAUBank,
+		TransactionDate: txnDate,
+		ValueDate:       valueDate,
+		Description:     desc,
+		ReferenceNo:     extractReference(text),
+		Amount:          amount,
+		Type:            txnType,
+		Balance:         balance,
+		Category:        "Uncategorized",
+		CreatedAt:       time.Now(),
+	}
 }
 
-// parseIndianAmount handles amounts like "1,25,912.58" and "-".
+// extractDates finds all "DD Mon YYYY" patterns in text and parses them.
+func extractDates(text string) []time.Time {
+	matches := dateRe.FindAllString(text, -1)
+	var dates []time.Time
+	for _, m := range matches {
+		// Normalise: collapse any internal whitespace
+		m = strings.Join(strings.Fields(m), " ")
+		t, err := time.Parse(dateLayout, m)
+		if err == nil {
+			dates = append(dates, t)
+		}
+	}
+	return dates
+}
+
+// extractAmounts finds all numeric amounts in the row (right side of the row).
+func extractAmounts(text string) []float64 {
+	matches := amountRe.FindAllString(text, -1)
+	var amounts []float64
+	for _, m := range matches {
+		v, err := parseIndianAmount(m)
+		if err == nil && v > 0 {
+			amounts = append(amounts, v)
+		}
+	}
+	return amounts
+}
+
+// extractDescription pulls the middle portion of the row as description text.
+// It strips leading dates and trailing amounts/reference numbers.
+func extractDescription(text string) string {
+	// Remove all date occurrences from the left.
+	result := dateRe.ReplaceAllString(text, " ")
+	// Remove amounts (numbers with commas and decimals).
+	result = amountRe.ReplaceAllString(result, " ")
+	// Remove standalone "-" that represent empty debit/credit cells.
+	result = regexp.MustCompile(`\s+-\s+`).ReplaceAllString(result, " ")
+	// Remove long reference-looking tokens (ICIxxxxxx, alphanumeric ≥15 chars).
+	result = regexp.MustCompile(`\b[A-Za-z0-9]{15,}\b`).ReplaceAllString(result, " ")
+	return cleanDescription(result)
+}
+
+// extractReference tries to find the cheque/reference number — a long
+// alphanumeric token that isn't part of UPI strings.
+func extractReference(text string) string {
+	// Look for tokens that look like ICICI reference numbers: start with IC or
+	// are purely hex-like, length 20-40.
+	refPattern := regexp.MustCompile(`\b(IC[A-Za-z0-9]{18,}|[0-9]{10,15})\b`)
+	m := refPattern.FindString(text)
+	return m
+}
+
+func cleanDescription(s string) string {
+	s = strings.Join(strings.Fields(s), " ")
+	s = strings.TrimSpace(s)
+	return s
+}
+
+func isNonTransactionRow(text string) bool {
+	lower := strings.ToLower(text)
+	for _, w := range stopWords {
+		if strings.Contains(lower, w) {
+			return true
+		}
+	}
+	return false
+}
+
+func looksLikePageHeader(text string) bool {
+	lower := strings.ToLower(text)
+	return strings.Contains(lower, "page") ||
+		strings.Contains(lower, "account") ||
+		strings.Contains(lower, "narration")
+}
+
+// parseIndianAmount handles "1,25,912.58" and plain "45.00".
 func parseIndianAmount(s string) (float64, error) {
 	s = strings.ReplaceAll(s, ",", "")
 	s = strings.ReplaceAll(s, "₹", "")
@@ -252,19 +269,5 @@ func parseIndianAmount(s string) (float64, error) {
 	if s == "" || s == "-" {
 		return 0, nil
 	}
-	v, err := strconv.ParseFloat(s, 64)
-	if err != nil {
-		return 0, fmt.Errorf("parseIndianAmount(%q): %w", s, err)
-	}
-	return v, nil
+	return strconv.ParseFloat(s, 64)
 }
-
-// Ensure Parser satisfies the parser.Parser interface at compile time.
-var _ interface {
-	Parse(string, string) ([]*models.Transaction, error)
-	Name() string
-	Source() models.SourceType
-} = (*Parser)(nil)
-
-// amountRe is used externally if needed.
-var _ = amountRe

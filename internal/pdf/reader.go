@@ -20,6 +20,10 @@ type TextElement struct {
 	Content  string
 	FontSize float64
 	Page     int
+	// StreamIdx records the element's original position in the PDF content
+	// stream. Preserving this order is critical for PDFs that use RTL-encoded
+	// fonts where X positions are reversed per character (AU Bank uses this).
+	StreamIdx int
 }
 
 // PageContent holds all text elements for one page.
@@ -71,16 +75,17 @@ func extractText(path string) ([]PageContent, error) {
 		}
 
 		var elems []TextElement
-		for _, t := range p.Content().Text {
+		for idx, t := range p.Content().Text {
 			if strings.TrimSpace(t.S) == "" {
 				continue
 			}
 			elems = append(elems, TextElement{
-				X:        t.X,
-				Y:        t.Y,
-				Content:  t.S,
-				FontSize: t.FontSize,
-				Page:     pageNum,
+				X:         t.X,
+				Y:         t.Y,
+				Content:   t.S,
+				FontSize:  t.FontSize,
+				Page:      pageNum,
+				StreamIdx: idx,
 			})
 		}
 		pages = append(pages, PageContent{PageNum: pageNum, Elements: elems})
@@ -90,19 +95,19 @@ func extractText(path string) ([]PageContent, error) {
 
 // GroupByRows clusters text elements that share approximately the same Y
 // coordinate into rows, then sorts each row left-to-right by X.
+// Use this for PDFs with standard LTR fonts (HDFC, Amazon Pay ICICI).
 // tolerance is in PDF points (1 pt ≈ 0.35 mm); 3–5 works well in practice.
 func GroupByRows(elements []TextElement, tolerance float64) [][]TextElement {
 	if len(elements) == 0 {
 		return nil
 	}
 
-	// Sort top-to-bottom (highest Y first in PDF space) then left-to-right.
 	sorted := make([]TextElement, len(elements))
 	copy(sorted, elements)
 	sort.Slice(sorted, func(i, j int) bool {
 		dy := sorted[i].Y - sorted[j].Y
 		if math.Abs(dy) > tolerance {
-			return dy > 0 // higher Y = earlier in reading order
+			return dy > 0
 		}
 		return sorted[i].X < sorted[j].X
 	})
@@ -128,12 +133,100 @@ func GroupByRows(elements []TextElement, tolerance float64) [][]TextElement {
 	return rows
 }
 
+// GroupByRowsNaturalOrder groups elements by Y position but preserves the
+// original PDF content stream order within each row.
+//
+// AU Bank PDFs use an RTL-encoded font where every character is a separate
+// text element and X positions run right-to-left within each word. Sorting
+// by X ascending produces reversed/garbled text. Using the content stream
+// order (the order the PDF renderer draws characters) restores correct
+// left-to-right reading order.
+func GroupByRowsNaturalOrder(elements []TextElement, tolerance float64) [][]TextElement {
+	if len(elements) == 0 {
+		return nil
+	}
+
+	// Assign each element to a row bucket based on Y proximity.
+	// We scan in stream order so each element joins the first row bucket
+	// whose Y is within tolerance.
+	type rowBucket struct {
+		refY     float64
+		elements []TextElement
+	}
+	var buckets []rowBucket
+
+	for _, el := range elements {
+		placed := false
+		for i := range buckets {
+			if math.Abs(el.Y-buckets[i].refY) <= tolerance {
+				buckets[i].elements = append(buckets[i].elements, el)
+				placed = true
+				break
+			}
+		}
+		if !placed {
+			buckets = append(buckets, rowBucket{refY: el.Y, elements: []TextElement{el}})
+		}
+	}
+
+	// Sort buckets top-to-bottom (highest Y = top of page in PDF space).
+	sort.Slice(buckets, func(i, j int) bool {
+		return buckets[i].refY > buckets[j].refY
+	})
+
+	rows := make([][]TextElement, len(buckets))
+	for i, b := range buckets {
+		rows[i] = b.elements // natural stream order preserved
+	}
+	return rows
+}
+
+// ReconstructText rebuilds human-readable text from a row whose elements are
+// in natural content stream order (e.g. from GroupByRowsNaturalOrder).
+//
+// For RTL-encoded fonts (AU Bank), characters within a word have decreasing X
+// positions in stream order. A word boundary is signalled by either:
+//   - X jumping UP (moving to the next column to the right), or
+//   - X dropping by more than ~2× the normal inter-character step (a space).
+func ReconstructText(row []TextElement) string {
+	if len(row) == 0 {
+		return ""
+	}
+
+	var sb strings.Builder
+	sb.WriteString(row[0].Content)
+
+	for i := 1; i < len(row); i++ {
+		prev := row[i-1]
+		curr := row[i]
+
+		charW := prev.FontSize * 0.55
+		if charW < 3 {
+			charW = 5
+		}
+
+		xDiff := curr.X - prev.X
+
+		switch {
+		case xDiff > charW:
+			// X jumped right → moved to a new column or a wide gap → space
+			sb.WriteByte(' ')
+		case xDiff < -(charW * 2.8):
+			// X dropped more than ~3 char widths → word space within RTL column
+			sb.WriteByte(' ')
+		}
+		sb.WriteString(curr.Content)
+	}
+	return sb.String()
+}
+
 func sortByX(row []TextElement) []TextElement {
 	sort.Slice(row, func(i, j int) bool { return row[i].X < row[j].X })
 	return row
 }
 
 // RowText joins all content in a row with a single space.
+// Useful for keyword detection where exact spacing doesn't matter.
 func RowText(row []TextElement) string {
 	parts := make([]string, len(row))
 	for i, el := range row {
@@ -142,7 +235,8 @@ func RowText(row []TextElement) string {
 	return strings.Join(parts, " ")
 }
 
-// AllElements flattens all pages into a single slice.
+// AllElements flattens all pages into a single slice, preserving per-page
+// stream order.
 func AllElements(pages []PageContent) []TextElement {
 	var all []TextElement
 	for _, p := range pages {
