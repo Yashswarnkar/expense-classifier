@@ -1,0 +1,16 @@
+ollama:
+  base_url: "http://localhost:11434"
+  model: "mistral"
+  timeout: "60s"
+
+categories:
+  file_path: "categories.txt"
+
+storage:
+  sqlite_path: "./expenses.db"
+  export_dir: "./exports"
+
+processing:
+  interactive: false
+  skip_llm: false
+  deduplicate_across_sources: true

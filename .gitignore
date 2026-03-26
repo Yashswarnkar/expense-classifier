@@ -1,0 +1,31 @@
+# Binaries
+expense-classifier
+expense-classifier.exe
+
+# Build artifacts
+dist/
+
+# Runtime data
+*.db
+*.db-shm
+*.db-wal
+exports/
+
+# PDF statements — never commit these
+*.pdf
+
+# Config with secrets
+config.local.yaml
+
+# Go modules cache
+vendor/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db

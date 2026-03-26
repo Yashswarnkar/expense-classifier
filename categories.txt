@@ -1,0 +1,26 @@
+# Expense categories for the LLM classifier.
+#
+# Format:
+#   CategoryName: keyword1, keyword2, keyword3
+#   CategoryName              ← keywords are optional
+#
+# The LLM will use the description text on its own even without keywords.
+# Keywords act as hints and improve accuracy for ambiguous merchants.
+
+Groceries: supermarket, kirana, vegetables, fruits, bigbasket, blinkit, zepto, swiggy instamart, dmart, reliance fresh, more stores
+Dining Out: restaurant, cafe, zomato, swiggy, pizza, burger, biryani, waffle, bakery, bar
+Transport: uber, ola, rapido, cab, auto, metro, irctc, railway, bus, petrol, fuel, namma yatri
+Travel: flight, indigo, air india, makemytrip, cleartrip, goibibo, booking, hotel, airbnb, airport
+Shopping: amazon, flipkart, myntra, meesho, ajio, nykaa, lifestyle, max fashion, westside
+Utilities: electricity, water, gas, broadband, internet, jio, airtel, vi, bsnl, tata sky, dish tv, netflix, hotstar, spotify, prime
+Healthcare: pharmacy, medical, hospital, clinic, diagnostic, lab, apollo, medplus, netmeds
+Entertainment: bookmyshow, pvr, inox, movie, concert, event, gaming
+Education: school, college, university, udemy, coursera, byju, unacademy, fees
+Rent & Housing: rent, maintenance, society, housing
+Insurance: lic, insurance, premium, policy
+Investments: mutual fund, sip, stocks, zerodha, groww, upstox, kuvera, nps, ppf
+Personal Care: salon, spa, gym, fitness, cult.fit, haircut
+Finance Charges: interest, penalty, late fee, gst, bank charges, processing fee
+Transfers: transfer, neft, imps, rtgs, upi transfer
+Salary & Income: salary, bonus, cashback
+Uncategorized
