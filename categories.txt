@@ -21,6 +21,7 @@ Insurance: lic, insurance, premium, policy
 Investments: mutual fund, sip, stocks, zerodha, groww, upstox, kuvera, nps, ppf
 Personal Care: salon, spa, gym, fitness, cult.fit, haircut
 Finance Charges: interest, penalty, late fee, gst, bank charges, processing fee
+Credit Card Payment: cred, credit card payment, cc bill, cc autopay, bill payment hdfc, bill payment sbi, bill payment axis, bill payment icici, bill payment amex, creditcard, credit card bill
 Transfers: transfer, neft, imps, rtgs, upi transfer
 Salary & Income: salary, bonus, cashback
 Uncategorized

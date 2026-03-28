@@ -16,7 +16,8 @@ All data stays on your machine — no external API calls, no cloud storage.
 - User-defined categories with optional hint keywords (`categories.txt`)
 - SQLite storage for all transactions — new statements never overwrite existing data
 - Export to CSV and/or JSON
-- Spending summary by category (ready for a future UI)
+- Smart credit card payment handling — CC bill payments (e.g. via CRED, autopay) are classified separately and excluded from the spending total to avoid double-counting with credit card statement transactions
+- Spending summary by category with a dedicated CC payment section showing payment count and total amount
 - Interactive mode: review and override each LLM suggestion at the terminal
 - `classify` command: manually fix a single transaction or re-run the LLM on everything still marked *Uncategorized*
 - `debug-pdf` command: dump raw extracted text rows to diagnose parser issues
@@ -138,6 +139,18 @@ Uncategorized
 
 The LLM uses the full transaction description regardless of keywords — keywords are just extra context in the prompt.
 
+### Credit Card Payment category
+
+The `Credit Card Payment` category is built-in and handles CC bill payments made from your bank account — via CRED, bank autopay, or direct transfer to any card issuer:
+
+```text
+Credit Card Payment: cred, credit card payment, cc bill, cc autopay,
+                     bill payment hdfc, bill payment sbi, bill payment axis,
+                     bill payment icici, bill payment amex, creditcard, credit card bill
+```
+
+When you import both an AU Bank statement and an HDFC CC statement, the AU Bank debit for paying the CC bill and the individual HDFC transactions both represent the same spending. Classifying the bank-side payment as `Credit Card Payment` and excluding it from totals prevents double-counting while still giving you visibility into how much you paid and when.
+
 ---
 
 ## Commands
@@ -176,6 +189,25 @@ Print a per-category spending table to stdout.
 Flags:
       --export   Also write summary CSV+JSON to the export directory
 ```
+
+The output is split into two sections:
+
+```
+CATEGORY        DEBIT (₹)   CREDIT (₹)   NET SPEND (₹)   COUNT
+--------        ---------   ----------   -------------   -----
+Groceries       3500.00     0.00         3500.00          12
+Dining Out      2100.00     0.00         2100.00           8
+...
+TOTAL           18000.00    500.00       17500.00
+
+── Credit Card Payments (excluded from total to avoid double-counting) ──
+CATEGORY               DEBIT (₹)    CREDIT (₹)   NET SPEND (₹)   COUNT
+--------               ---------    ----------   -------------   -----
+Credit Card Payment    25000.00     0.00         25000.00         3
+TOTAL CC PAID          25000.00     0.00         25000.00
+```
+
+`Credit Card Payment` transactions are shown separately so you can see your total CC outflow, but they are excluded from `TOTAL` to avoid double-counting with the detailed per-transaction breakdown from your credit card statements.
 
 ### `classify`
 
