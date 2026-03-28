@@ -38,7 +38,7 @@ func runSummary(_ *cobra.Command, _ []string) error {
 	}
 	defer store.Close()
 
-	summaries, err := store.Summary(ctx)
+	summaries, err := store.Summary(ctx, "", "")
 	if err != nil {
 		return err
 	}

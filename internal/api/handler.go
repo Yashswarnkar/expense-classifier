@@ -181,8 +181,11 @@ func (h *Handler) deleteTransaction(w http.ResponseWriter, r *http.Request) {
 }
 
 // getSummary handles GET /api/summary
+// Optional query params: from, to (YYYY-MM-DD)
 func (h *Handler) getSummary(w http.ResponseWriter, r *http.Request) {
-	summaries, err := h.store.Summary(r.Context())
+	from := r.URL.Query().Get("from")
+	to := r.URL.Query().Get("to")
+	summaries, err := h.store.Summary(r.Context(), from, to)
 	if err != nil {
 		jsonError(w, "failed to fetch summary: "+err.Error(), http.StatusInternalServerError)
 		return

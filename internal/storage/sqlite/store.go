@@ -235,17 +235,27 @@ func (s *Store) ExistingHashes(ctx context.Context) ([]string, error) {
 	return hashes, rows.Err()
 }
 
-func (s *Store) Summary(ctx context.Context) ([]*models.Summary, error) {
-	rows, err := s.db.QueryContext(ctx, `
+func (s *Store) Summary(ctx context.Context, from, to string) ([]*models.Summary, error) {
+	q := `
 		SELECT
 		    category,
 		    SUM(CASE WHEN txn_type = 'debit'  THEN amount ELSE 0 END) AS total_debit,
 		    SUM(CASE WHEN txn_type = 'credit' THEN amount ELSE 0 END) AS total_credit,
 		    COUNT(*) AS cnt
 		FROM transactions
-		GROUP BY category
-		ORDER BY total_debit DESC
-	`)
+		WHERE 1=1`
+	var args []interface{}
+	if from != "" {
+		q += ` AND transaction_date >= ?`
+		args = append(args, from)
+	}
+	if to != "" {
+		q += ` AND transaction_date <= ?`
+		args = append(args, to)
+	}
+	q += ` GROUP BY category ORDER BY total_debit DESC`
+
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, err
 	}
