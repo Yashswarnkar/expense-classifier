@@ -27,7 +27,13 @@ import (
 	pdfread "github.com/Yashswarnkar/expense-classifier/internal/pdf"
 )
 
-const rowTol = 4.0
+const (
+	rowTol = 4.0
+	// colGapFactor: an X jump larger than colGapFactor × charWidth is treated
+	// as a column separator rather than a word gap. AU Bank column gaps are
+	// typically 10–20× the character width, while word gaps are 1–3×.
+	colGapFactor = 10.0
+)
 
 var (
 	// Handles both "01Dec2025" (no spaces, from ReconstructText) and "01 Dec 2025"
@@ -41,6 +47,11 @@ var (
 	//   "45.00 - 1,25,912.58"   → debit=45.00  credit=-       balance=1,25,912.58
 	//   "- 2.00 53,717.56"      → debit=-       credit=2.00    balance=53,717.56
 	amountTripletRe = regexp.MustCompile(`([\d,]+\.\d{2}|-)\s+([\d,]+\.\d{2}|-)\s+([\d,]+\.\d{2})\s*$`)
+
+	// refSuffixRe strips a trailing bank transaction reference that leaks into
+	// the description from the main row (e.g. "YESb98abc1234567890").
+	// Pattern: 0–4 uppercase letters followed by 8+ lowercase hex chars.
+	refSuffixRe = regexp.MustCompile(`\s+[A-Z]{0,4}[a-f0-9]{8,}\s*$`)
 
 	stopWords = []string{
 		"account statement", "statement date", "opening balance",
@@ -117,7 +128,10 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 		}
 
 		// Gather description text from every row in the block.
+		// Non-main rows are split at the first column gap so that the
+		// Cheque/Reference column does not leak into the description.
 		var descParts []string
+		var refNo string
 		for j := blockStart; j <= blockEnd; j++ {
 			t := strings.TrimSpace(texts[j])
 			if t == "" || isNonTxnRow(t) {
@@ -126,7 +140,19 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 			if j == mainIdx {
 				// Strip dates, amounts, and balance from the main row —
 				// what remains is the middle portion of the description.
+				// Also strip any trailing bank reference suffix.
 				t = descFromMainRow(t)
+				t = refSuffixRe.ReplaceAllString(t, "")
+				t = cleanDesc(t)
+			} else {
+				// For pre-rows and continuation rows, split at the first
+				// large X gap (column boundary) to separate description
+				// from the Cheque/Reference column.
+				desc, ref := firstAndSecondColumn(rows[j])
+				t = desc
+				if refNo == "" && ref != "" {
+					refNo = ref
+				}
 			}
 			if t != "" {
 				descParts = append(descParts, t)
@@ -136,7 +162,7 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 		desc := cleanDesc(strings.Join(descParts, " "))
 		dates := findDates(texts[mainIdx])
 
-		txn := buildTxn(dates, texts[mainIdx], desc)
+		txn := buildTxn(dates, texts[mainIdx], desc, refNo)
 		if txn != nil {
 			txn.Hash = txn.ComputeHash()
 			txns = append(txns, txn)
@@ -156,7 +182,7 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 // where each of debit_cell / credit_cell is either a number or "-".
 // This is the only reliable way to distinguish debit from credit because
 // the "-" placeholder is lost when scanning for numeric amounts alone.
-func buildTxn(dates []time.Time, mainRowText, desc string) *models.Transaction {
+func buildTxn(dates []time.Time, mainRowText, desc, refNo string) *models.Transaction {
 	if len(dates) == 0 || desc == "" {
 		return nil
 	}
@@ -199,6 +225,7 @@ func buildTxn(dates []time.Time, mainRowText, desc string) *models.Transaction {
 		TransactionDate: txnDate,
 		ValueDate:       valueDate,
 		Description:     desc,
+		ReferenceNo:     refNo,
 		Amount:          amount,
 		Type:            txnType,
 		Balance:         balance,
@@ -264,4 +291,52 @@ func isNonTxnRow(text string) bool {
 
 func cleanDesc(s string) string {
 	return strings.TrimSpace(strings.Join(strings.Fields(s), " "))
+}
+
+// firstAndSecondColumn splits a row's elements at the first large X gap
+// (column boundary) and returns the text of the first column (description)
+// and second column (reference / other). If no column boundary is detected,
+// the whole row is returned as the first column and ref is empty.
+func firstAndSecondColumn(row []pdfread.TextElement) (desc, ref string) {
+	if len(row) == 0 {
+		return "", ""
+	}
+
+	var col strings.Builder
+	col.WriteString(row[0].Content)
+	splitAt := -1
+
+	for i := 1; i < len(row); i++ {
+		prev := row[i-1]
+		curr := row[i]
+
+		charW := prev.FontSize * 0.55
+		if charW < 3 {
+			charW = 5
+		}
+		xDiff := curr.X - prev.X
+
+		if splitAt < 0 && xDiff > charW*colGapFactor {
+			// First column boundary — save col1, start col2.
+			desc = cleanDesc(col.String())
+			col.Reset()
+			col.WriteString(curr.Content)
+			splitAt = i
+			continue
+		}
+
+		// Within whichever column we're in, apply the same spacing logic
+		// as ReconstructText.
+		if xDiff > charW {
+			col.WriteByte(' ')
+		} else if xDiff < -(charW * 2.8) {
+			col.WriteByte(' ')
+		}
+		col.WriteString(curr.Content)
+	}
+
+	if splitAt < 0 {
+		return cleanDesc(col.String()), ""
+	}
+	return desc, cleanDesc(col.String())
 }
