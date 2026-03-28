@@ -209,6 +209,29 @@ TOTAL CC PAID          25000.00     0.00         25000.00
 
 `Credit Card Payment` transactions are shown separately so you can see your total CC outflow, but they are excluded from `TOTAL` to avoid double-counting with the detailed per-transaction breakdown from your credit card statements.
 
+### `serve`
+
+Start the HTTP API server that powers the [expense-frontend](https://github.com/Yashswarnkar/expense-frontend) web UI.
+
+```
+Flags:
+      --port int   Port to listen on (default 8080)
+```
+
+```bash
+./expense-classifier serve           # http://localhost:8080
+./expense-classifier serve --port 9090
+```
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| `GET` | `/api/transactions` | List transactions — filters: `category`, `source`, `from`, `to`, `search`, `limit` |
+| `PATCH` | `/api/transactions/:id` | Update a transaction's category |
+| `GET` | `/api/summary` | Spending totals by category (CC payments split into separate array) |
+| `GET` | `/api/categories` | Available categories from `categories.txt` |
+
+CORS is enabled so the Vite dev server (`:5173`) can call the API without a proxy.
+
 ### `list`
 
 List transactions in the terminal with optional filters. This is the primary way to browse classified transactions and fix categories without touching an export file.

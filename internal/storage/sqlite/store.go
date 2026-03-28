@@ -128,6 +128,52 @@ func (s *Store) GetByCategory(ctx context.Context, category string) ([]*models.T
 		`SELECT * FROM transactions WHERE LOWER(category) = LOWER(?) ORDER BY transaction_date DESC`, category)
 }
 
+// ListOptions holds optional filters for the List query.
+type ListOptions struct {
+	Category string
+	Source   string
+	From     *time.Time
+	To       *time.Time
+	Search   string
+	Limit    int
+}
+
+// List returns transactions matching all supplied filters.
+func (s *Store) List(ctx context.Context, opts ListOptions) ([]*models.Transaction, error) {
+	q := `SELECT * FROM transactions WHERE 1=1`
+	var args []interface{}
+
+	if opts.Category != "" {
+		q += ` AND LOWER(category) = LOWER(?)`
+		args = append(args, opts.Category)
+	}
+	if opts.Source != "" {
+		q += ` AND source = ?`
+		args = append(args, opts.Source)
+	}
+	if opts.From != nil {
+		q += ` AND transaction_date >= ?`
+		args = append(args, opts.From.Format("2006-01-02"))
+	}
+	if opts.To != nil {
+		q += ` AND transaction_date <= ?`
+		args = append(args, opts.To.Format("2006-01-02"))
+	}
+	if opts.Search != "" {
+		q += ` AND LOWER(description) LIKE LOWER(?)`
+		args = append(args, "%"+opts.Search+"%")
+	}
+
+	q += ` ORDER BY transaction_date DESC, id`
+
+	if opts.Limit > 0 {
+		q += ` LIMIT ?`
+		args = append(args, opts.Limit)
+	}
+
+	return s.query(ctx, q, args...)
+}
+
 func (s *Store) ExistingHashes(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT hash FROM transactions`)
 	if err != nil {
