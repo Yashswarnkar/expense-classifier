@@ -107,11 +107,11 @@ func (p *Parser) Parse(filePath, password string) ([]*models.Transaction, error)
 // Pass 2: identify "main rows" — rows that contain ≥1 date AND ≥2 amounts.
 // Pass 3: for each main row at index m, the transaction block spans rows
 //
-//	[prev_main+1 … next_main-2]
+//	[m-1 … next_main-2]
 //
-// The -2 is because (next_main-1) is always the pre-row of the next
-// transaction (containing the start of the next description), which belongs
-// to the next transaction, not the current one.
+// m-1 is the pre-row (start of this transaction's description).
+// next_main-2 is the last continuation row of this transaction because
+// next_main-1 is the pre-row of the next transaction.
 func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 	texts := make([]string, len(rows))
 	for i, row := range rows {
@@ -129,9 +129,16 @@ func parsePageRows(rows [][]pdfread.TextElement) []*models.Transaction {
 	var txns []*models.Transaction
 
 	for i, mainIdx := range mainIdxs {
-		// Block start: row after previous main row (or 0).
-		blockStart := 0
-		if i > 0 {
+		// Block start: the pre-row immediately before the main row (mainIdx-1).
+		// Using prev_main+1 was wrong — it included continuation rows of the
+		// previous transaction that sit between prev_main+1 and mainIdx-2.
+		blockStart := mainIdx - 1
+		if blockStart < 0 {
+			blockStart = 0
+		}
+		// Guard: if there is no gap (back-to-back main rows), don't step into
+		// the previous transaction's main row.
+		if i > 0 && mainIdxs[i-1] >= blockStart {
 			blockStart = mainIdxs[i-1] + 1
 		}
 
