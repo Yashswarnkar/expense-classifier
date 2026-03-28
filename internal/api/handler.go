@@ -67,6 +67,20 @@ func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
 		}
 		opts.Limit = n
 	}
+	if s := q.Get("offset"); s != "" {
+		n, err := strconv.Atoi(s)
+		if err != nil || n < 0 {
+			jsonError(w, "invalid 'offset'", http.StatusBadRequest)
+			return
+		}
+		opts.Offset = n
+	}
+
+	total, err := h.store.Count(r.Context(), opts)
+	if err != nil {
+		jsonError(w, "failed to count transactions: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
 
 	txns, err := h.store.List(r.Context(), opts)
 	if err != nil {
@@ -81,7 +95,7 @@ func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
 
 	jsonOK(w, map[string]interface{}{
 		"transactions": out,
-		"total":        len(out),
+		"total":        total,
 	})
 }
 

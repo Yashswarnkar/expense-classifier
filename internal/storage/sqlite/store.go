@@ -128,7 +128,7 @@ func (s *Store) GetByCategory(ctx context.Context, category string) ([]*models.T
 		`SELECT * FROM transactions WHERE LOWER(category) = LOWER(?) ORDER BY transaction_date DESC`, category)
 }
 
-// ListOptions holds optional filters for the List query.
+// ListOptions holds optional filters for the List and Count queries.
 type ListOptions struct {
 	Category string
 	Source   string
@@ -136,11 +136,12 @@ type ListOptions struct {
 	To       *time.Time
 	Search   string
 	Limit    int
+	Offset   int
 }
 
-// List returns transactions matching all supplied filters.
-func (s *Store) List(ctx context.Context, opts ListOptions) ([]*models.Transaction, error) {
-	q := `SELECT * FROM transactions WHERE 1=1`
+// whereClause builds the shared WHERE clause and args from opts.
+func whereClause(opts ListOptions) (string, []interface{}) {
+	q := ` WHERE 1=1`
 	var args []interface{}
 
 	if opts.Category != "" {
@@ -163,12 +164,29 @@ func (s *Store) List(ctx context.Context, opts ListOptions) ([]*models.Transacti
 		q += ` AND LOWER(description) LIKE LOWER(?)`
 		args = append(args, "%"+opts.Search+"%")
 	}
+	return q, args
+}
 
-	q += ` ORDER BY transaction_date DESC, id`
+// Count returns the total number of transactions matching opts (ignores Limit/Offset).
+func (s *Store) Count(ctx context.Context, opts ListOptions) (int, error) {
+	where, args := whereClause(opts)
+	row := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM transactions`+where, args...)
+	var n int
+	return n, row.Scan(&n)
+}
+
+// List returns transactions matching all supplied filters.
+func (s *Store) List(ctx context.Context, opts ListOptions) ([]*models.Transaction, error) {
+	where, args := whereClause(opts)
+	q := `SELECT * FROM transactions` + where + ` ORDER BY transaction_date DESC, id`
 
 	if opts.Limit > 0 {
 		q += ` LIMIT ?`
 		args = append(args, opts.Limit)
+		if opts.Offset > 0 {
+			q += ` OFFSET ?`
+			args = append(args, opts.Offset)
+		}
 	}
 
 	return s.query(ctx, q, args...)
