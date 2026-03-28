@@ -29,6 +29,7 @@ func New(store *sqlite.Store, categoriesFile string) *Handler {
 func (h *Handler) Register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /api/transactions", h.listTransactions)
 	mux.HandleFunc("PATCH /api/transactions/{id}", h.updateTransaction)
+	mux.HandleFunc("DELETE /api/transactions/{id}", h.deleteTransaction)
 	mux.HandleFunc("GET /api/summary", h.getSummary)
 	mux.HandleFunc("GET /api/categories", h.getCategories)
 }
@@ -100,6 +101,7 @@ func (h *Handler) listTransactions(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateTransaction handles PATCH /api/transactions/{id}
+// Accepts: { "category": "..." } and/or { "description": "..." }
 func (h *Handler) updateTransaction(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	if id == "" {
@@ -108,19 +110,65 @@ func (h *Handler) updateTransaction(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body struct {
-		Category string `json:"category"`
+		Category    *string `json:"category"`
+		Description *string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		jsonError(w, "invalid request body", http.StatusBadRequest)
 		return
 	}
-	body.Category = strings.TrimSpace(body.Category)
-	if body.Category == "" {
-		jsonError(w, "category must not be empty", http.StatusBadRequest)
+
+	if body.Category == nil && body.Description == nil {
+		jsonError(w, "provide at least one of: category, description", http.StatusBadRequest)
 		return
 	}
 
-	if err := h.store.UpdateCategory(r.Context(), id, body.Category); err != nil {
+	ctx := r.Context()
+
+	if body.Category != nil {
+		cat := strings.TrimSpace(*body.Category)
+		if cat == "" {
+			jsonError(w, "category must not be empty", http.StatusBadRequest)
+			return
+		}
+		if err := h.store.UpdateCategory(ctx, id, cat); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				jsonError(w, err.Error(), http.StatusNotFound)
+			} else {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+
+	if body.Description != nil {
+		desc := strings.TrimSpace(*body.Description)
+		if desc == "" {
+			jsonError(w, "description must not be empty", http.StatusBadRequest)
+			return
+		}
+		if err := h.store.UpdateDescription(ctx, id, desc); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				jsonError(w, err.Error(), http.StatusNotFound)
+			} else {
+				jsonError(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+	}
+
+	jsonOK(w, map[string]string{"id": id})
+}
+
+// deleteTransaction handles DELETE /api/transactions/{id}
+func (h *Handler) deleteTransaction(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	if id == "" {
+		jsonError(w, "missing transaction id", http.StatusBadRequest)
+		return
+	}
+
+	if err := h.store.Delete(r.Context(), id); err != nil {
 		if strings.Contains(err.Error(), "not found") {
 			jsonError(w, err.Error(), http.StatusNotFound)
 		} else {
@@ -129,7 +177,7 @@ func (h *Handler) updateTransaction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	jsonOK(w, map[string]string{"id": id, "category": body.Category})
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // getSummary handles GET /api/summary
@@ -186,7 +234,7 @@ func (h *Handler) getCategories(w http.ResponseWriter, r *http.Request) {
 func CORS(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, PATCH, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, PATCH, DELETE, OPTIONS")
 		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
 		if r.Method == http.MethodOptions {
 			w.WriteHeader(http.StatusNoContent)

@@ -108,6 +108,31 @@ func (s *Store) UpdateCategory(ctx context.Context, id, category string) error {
 	return nil
 }
 
+func (s *Store) UpdateDescription(ctx context.Context, id, description string) error {
+	res, err := s.db.ExecContext(ctx,
+		`UPDATE transactions SET description = ? WHERE id = ?`, description, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("sqlite: transaction %q not found", id)
+	}
+	return nil
+}
+
+func (s *Store) Delete(ctx context.Context, id string) error {
+	res, err := s.db.ExecContext(ctx, `DELETE FROM transactions WHERE id = ?`, id)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return fmt.Errorf("sqlite: transaction %q not found", id)
+	}
+	return nil
+}
+
 func (s *Store) GetAll(ctx context.Context) ([]*models.Transaction, error) {
 	return s.query(ctx, `SELECT * FROM transactions ORDER BY transaction_date DESC, id`)
 }
