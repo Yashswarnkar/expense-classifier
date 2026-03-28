@@ -209,6 +209,50 @@ TOTAL CC PAID          25000.00     0.00         25000.00
 
 `Credit Card Payment` transactions are shown separately so you can see your total CC outflow, but they are excluded from `TOTAL` to avoid double-counting with the detailed per-transaction breakdown from your credit card statements.
 
+### `list`
+
+List transactions in the terminal with optional filters. This is the primary way to browse classified transactions and fix categories without touching an export file.
+
+```
+Flags:
+      --category string   Filter by category name (case-insensitive)
+      --source string     Filter by source: aubank | hdfc_cc | amazon_pay_cc
+      --from string       Start date YYYY-MM-DD
+      --to string         End date YYYY-MM-DD
+  -i, --interactive       Review and update each transaction's category interactively
+      --limit int         Maximum number of transactions to show (0 = all)
+```
+
+```bash
+# Show all transactions
+./expense-classifier list
+
+# Browse a specific category
+./expense-classifier list --category "Dining Out"
+
+# Find and fix Uncategorized transactions interactively
+./expense-classifier list --category Uncategorized --interactive
+
+# Filter by source and date range
+./expense-classifier list --source hdfc_cc --from 2025-12-01 --to 2025-12-31
+
+# Show only the 20 most recent
+./expense-classifier list --limit 20
+```
+
+Example output:
+```
+DATE          AMOUNT (₹)   TYPE    CATEGORY              SOURCE     DESCRIPTION
+----          ----------   ----    --------              ------     -----------
+01 Dec 2025   25000.00     debit   Credit Card Payment   au_bank    CRED/HDFC CC BILL PAYMENT
+03 Dec 2025   450.00       debit   Dining Out            hdfc_cc    SWIGGY ORDER #123456
+...
+
+12 transaction(s)
+```
+
+In `--interactive` mode, each transaction is shown one by one and you can type a new category or press Enter to keep the existing one. Changes are saved immediately to the database.
+
 ### `classify`
 
 Manually override a category or re-run the LLM.

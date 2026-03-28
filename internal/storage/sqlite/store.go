@@ -123,6 +123,11 @@ func (s *Store) GetByDateRange(ctx context.Context, from, to time.Time) ([]*mode
 		from.Format("2006-01-02"), to.Format("2006-01-02"))
 }
 
+func (s *Store) GetByCategory(ctx context.Context, category string) ([]*models.Transaction, error) {
+	return s.query(ctx,
+		`SELECT * FROM transactions WHERE LOWER(category) = LOWER(?) ORDER BY transaction_date DESC`, category)
+}
+
 func (s *Store) ExistingHashes(ctx context.Context) ([]string, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT hash FROM transactions`)
 	if err != nil {
