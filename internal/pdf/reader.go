@@ -187,7 +187,12 @@ func GroupByRowsNaturalOrder(elements []TextElement, tolerance float64) [][]Text
 // For RTL-encoded fonts (AU Bank), characters within a word have decreasing X
 // positions in stream order. A word boundary is signalled by either:
 //   - X jumping UP (moving to the next column to the right), or
-//   - X dropping by more than ~2× the normal inter-character step (a space).
+//   - X dropping by more than ~1.5× the normal inter-character step.
+//
+// Within a word the X step between adjacent chars is ~1×charW. At a word
+// boundary the drop is ~charW (prev char) + space width (~0.3–0.5×charW),
+// so word gaps land around 1.3–1.5×charW. A threshold of 1.5 catches those
+// gaps without splitting tight ligatures inside words.
 func ReconstructText(row []TextElement) string {
 	if len(row) == 0 {
 		return ""
@@ -211,8 +216,8 @@ func ReconstructText(row []TextElement) string {
 		case xDiff > charW:
 			// X jumped right → moved to a new column or a wide gap → space
 			sb.WriteByte(' ')
-		case xDiff < -(charW * 2.8):
-			// X dropped more than ~3 char widths → word space within RTL column
+		case xDiff < -(charW * 1.5):
+			// X dropped > 1.5× char width → word space within RTL column
 			sb.WriteByte(' ')
 		}
 		sb.WriteString(curr.Content)
